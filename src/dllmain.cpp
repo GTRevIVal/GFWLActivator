@@ -132,97 +132,143 @@ static std::string https_get(const char* hostname, const char* path) {
         throw std::runtime_error("WSAStartup failed");
 
     struct hostent* host = gethostbyname(hostname);
-    if (!host || !host->h_addr)
+    if (!host || !host->h_addr) {
+        WSACleanup();
         throw std::runtime_error("Failed to resolve hostname");
-
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET)
-        throw std::runtime_error(format_winsock_error(WSAGetLastError()));
-
-    u_long mode = 1;
-    ioctlsocket(sock, FIONBIO, &mode);
-
-    sockaddr_in server{};
-    server.sin_family = AF_INET;
-    server.sin_port = htons(443);
-    server.sin_addr.s_addr = *(u_long*)host->h_addr;
-
-    connect(sock, (sockaddr*)&server, sizeof(server));
-
-    if (!wait_for_socket(sock, true, 5000)) {
-        closesocket(sock);
-        throw std::runtime_error("Connection timed out");
     }
 
-    mode = 0;
-    ioctlsocket(sock, FIONBIO, &mode);
+    std::string response;
+    bool success = false;
 
-    SSL_library_init();
-    SSL_load_error_strings();
-    const SSL_METHOD* method = TLS_client_method();
-    SSL_CTX* ctx = SSL_CTX_new(method);
-    if (!ctx) {
-        closesocket(sock);
-        throw std::runtime_error(format_openssl_error());
-    }
+    for (int attempt = 0; attempt < 3 && !success; ++attempt) {
+        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock == INVALID_SOCKET) {
+            WSACleanup();
+            throw std::runtime_error(format_winsock_error(WSAGetLastError()));
+        }
 
-    SSL* ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sock);
+        u_long mode = 1;
+        ioctlsocket(sock, FIONBIO, &mode);
 
-    if (SSL_connect(ssl) != 1) {
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        closesocket(sock);
-        throw std::runtime_error("SSL_connect failed: " + format_openssl_error());
-    }
+        sockaddr_in server{};
+        server.sin_family = AF_INET;
+        server.sin_port = htons(443);
+        server.sin_addr.s_addr = *(u_long*)host->h_addr;
 
-    std::string request = "GET ";
-    request += path;
-    request += " HTTP/1.1\r\nHost: ";
-    request += hostname;
-    request += "\r\nConnection: close\r\n\r\n";
+        connect(sock, (sockaddr*)&server, sizeof(server));
 
-    if (SSL_write(ssl, request.c_str(), (int)request.length()) <= 0) {
+        if (!wait_for_socket(sock, true, 5000)) {
+            closesocket(sock);
+            if (attempt == 2) {
+                WSACleanup();
+                throw std::runtime_error("Connection timed out after 3 attempts");
+            }
+            continue;
+        }
+
+        mode = 0;
+        ioctlsocket(sock, FIONBIO, &mode);
+
+        SSL_library_init();
+        SSL_load_error_strings();
+        const SSL_METHOD* method = TLS_client_method();
+        SSL_CTX* ctx = SSL_CTX_new(method);
+        if (!ctx) {
+            closesocket(sock);
+            WSACleanup();
+            throw std::runtime_error(format_openssl_error());
+        }
+
+        SSL* ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, sock);
+
+        if (SSL_connect(ssl) != 1) {
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            closesocket(sock);
+            if (attempt == 2) {
+                WSACleanup();
+                throw std::runtime_error("SSL_connect failed after 3 attempts: " + format_openssl_error());
+            }
+            continue;
+        }
+
+        std::string request = "GET ";
+        request += path;
+        request += " HTTP/1.1\r\nHost: ";
+        request += hostname;
+        request += "\r\nConnection: close\r\n\r\n";
+
+        if (SSL_write(ssl, request.c_str(), (int)request.length()) <= 0) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            closesocket(sock);
+            if (attempt == 2) {
+                WSACleanup();
+                throw std::runtime_error("SSL_write failed after 3 attempts: " + format_openssl_error());
+            }
+            continue;
+        }
+
+        char buffer[4096];
+        int bytes;
+        response.clear();
+
+        while (true) {
+            if (!wait_for_socket(sock, false, 5000)) {
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+                SSL_CTX_free(ctx);
+                closesocket(sock);
+                if (attempt == 2) {
+                    WSACleanup();
+                    throw std::runtime_error("SSL_read timed out after 3 attempts");
+                }
+                break;
+            }
+            bytes = SSL_read(ssl, buffer, sizeof(buffer));
+            if (bytes > 0) {
+                response.append(buffer, bytes);
+            }
+            else {
+                int err = SSL_get_error(ssl, bytes);
+                if (err == SSL_ERROR_ZERO_RETURN || bytes == 0)
+                    break;
+                if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                    SSL_CTX_free(ctx);
+                    closesocket(sock);
+                    if (attempt == 2) {
+                        WSACleanup();
+                        throw std::runtime_error("SSL_read failed after 3 attempts: " + format_openssl_error());
+                    }
+                    break;
+                }
+                break;
+            }
+        }
+
+        size_t header_end = response.find("\r\n\r\n");
+        if (header_end != std::string::npos)
+            response = response.substr(header_end + 4);
+        else
+            response.clear();
+
         SSL_shutdown(ssl);
         SSL_free(ssl);
         SSL_CTX_free(ctx);
         closesocket(sock);
-        throw std::runtime_error("SSL_write failed: " + format_openssl_error());
+
+        success = true;
     }
 
-    std::string response;
-    char buffer[4096];
-    int bytes;
-
-    while (true) {
-        if (!wait_for_socket(sock, false, 5000)) {
-            throw std::runtime_error("SSL_read timed out");
-        }
-        bytes = SSL_read(ssl, buffer, sizeof(buffer));
-        if (bytes > 0) {
-            response.append(buffer, bytes);
-        }
-        else {
-            int err = SSL_get_error(ssl, bytes);
-            if (err == SSL_ERROR_ZERO_RETURN || bytes == 0)
-                break;
-            if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
-                throw std::runtime_error("SSL_read failed: " + format_openssl_error());
-            break;
-        }
-    }
-
-    size_t header_end = response.find("\r\n\r\n");
-    if (header_end != std::string::npos)
-        response = response.substr(header_end + 4);
-    else
-        response.clear();
-
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-    closesocket(sock);
     WSACleanup();
+
+    if (!success)
+        throw std::runtime_error("Failed to download after 3 attempts");
+
     return response;
 }
 
