@@ -1,6 +1,31 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="src\dllmain.cpp" />
+    <Filter Include="src">
+      <UniqueIdentifier>{e4fc3572-a90b-4696-9798-b7c733732b14}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\minhook">
+      <UniqueIdentifier>{05f73a0c-31f6-4d88-b0c6-a25f8d756568}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\dllmain.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="include\minhook\trampoline.c">
+      <Filter>src\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="include\minhook\buffer.c">
+      <Filter>src\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="include\minhook\hook.c">
+      <Filter>src\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="include\minhook\hde\hde64.c">
+      <Filter>src\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="include\minhook\hde\hde32.c">
+      <Filter>src\minhook</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

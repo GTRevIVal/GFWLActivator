@@ -7,13 +7,13 @@
 #include <filesystem>
 #include <shlobj.h>
 #include <locale>
-#include <codecvt>
+#include <thread>
 
+#include <curl/curl.h>
 #include <nlohmann/json.hpp>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
 
-#include "../include/IVSDK.cpp"
+#include "minhook/MinHook.h"
+#include "IVSDK.cpp"
 
 typedef unsigned int(__stdcall* XLiveSetSponsorTokenFunc)(LPCWSTR, DWORD);
 
@@ -83,6 +83,30 @@ std::vector<std::pair<std::string, std::wstring>> pairs, pairs_offline = {
     {"c22b30e89ba91e71", L"FFD9H-C2JMD-VCDV4-DDPFT-8H4P7"},
     {"e2421be6a381f938", L"FFD9H-C2JMD-VCDV4-DDPFT-8H4P7"},
     {"7d331075b1eaa7aa", L"D99H6-G4XMC-Q62J8-CWY44-P3DV7"},
+
+    // new
+    {"30372378dd64c533", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"65d34194039b7fab", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"b0633a3104122d67", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"e12e097fb62d5ee3", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"e14b8ec65d92fd14", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"375d9f5e673155e2", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"be7e1183bfa0c68a", L"QKH8F-MQGRB-BK84C-PQDKX-WYHDD"},
+    {"3db08f7f0aa1a255", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"8588eeaab73a4027", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"43f9fb4a2dbe33e6", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"fe91ce113e376b6d", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"9e65dcb9dfce669c", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"97076195f62d640d", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"b395bf8df18ff1a9", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"e73fc60d680912c0", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"323c597b34d50427", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"2b7230302b5d6639", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"bffb617d5874c87d", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"b18a8b7da38f4978", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"6d3fb7bef6f9d923", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+    {"029dbf419f4d926e", L"Q7JJ3-6DGH3-KQRP7-7JFFH-GK6V3"},
+
 };
 
 static std::wstring string_to_wstring(const std::string& str) {
@@ -90,189 +114,47 @@ static std::wstring string_to_wstring(const std::string& str) {
     return ws;
 }
 
-static std::string format_winsock_error(int err) {
-    char* msg{};
-    FormatMessageA(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, err,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPSTR)&msg, 0, nullptr
-    );
-    return std::string(msg);
+static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t totalSize = size * nmemb;
+    std::string* buffer = static_cast<std::string*>(userp);
+    buffer->append(static_cast<char*>(contents), totalSize);
+    return totalSize;
 }
 
-static std::string format_openssl_error() {
-    std::string result;
-    unsigned long errCode;
-
-    while ((errCode = ERR_get_error()) != 0) {
-        char buf[256];
-        ERR_error_string_n(errCode, buf, sizeof(buf));
-        result += buf;
-        result += '\n';
-    }
-
-    return result;
-}
-
-static bool wait_for_socket(SOCKET sock, bool for_write, int timeout_ms) {
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    int result = select(0, for_write ? nullptr : &fds, for_write ? &fds : nullptr, nullptr, &tv);
-    return result > 0;
-}
-
-static std::string https_get(const char* hostname, const char* path) {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0)
-        throw std::runtime_error("WSAStartup failed");
-
-    struct hostent* host = gethostbyname(hostname);
-    if (!host || !host->h_addr) {
-        WSACleanup();
-        throw std::runtime_error("Failed to resolve hostname");
+std::string download_from_web(const std::string& url) {
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        throw std::runtime_error("Failed to initialize CURL");
     }
 
     std::string response;
-    bool success = false;
 
-    for (int attempt = 0; attempt < 3 && !success; ++attempt) {
-        SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock == INVALID_SOCKET) {
-            WSACleanup();
-            throw std::runtime_error(format_winsock_error(WSAGetLastError()));
-        }
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
-        u_long mode = 1;
-        ioctlsocket(sock, FIONBIO, &mode);
+    CURLcode res = curl_easy_perform(curl);
 
-        sockaddr_in server{};
-        server.sin_family = AF_INET;
-        server.sin_port = htons(443);
-        server.sin_addr.s_addr = *(u_long*)host->h_addr;
-
-        connect(sock, (sockaddr*)&server, sizeof(server));
-
-        if (!wait_for_socket(sock, true, 5000)) {
-            closesocket(sock);
-            if (attempt == 2) {
-                WSACleanup();
-                throw std::runtime_error("Connection timed out after 3 attempts");
-            }
-            continue;
-        }
-
-        mode = 0;
-        ioctlsocket(sock, FIONBIO, &mode);
-
-        SSL_library_init();
-        SSL_load_error_strings();
-        const SSL_METHOD* method = TLS_client_method();
-        SSL_CTX* ctx = SSL_CTX_new(method);
-        if (!ctx) {
-            closesocket(sock);
-            WSACleanup();
-            throw std::runtime_error(format_openssl_error());
-        }
-
-        SSL* ssl = SSL_new(ctx);
-        SSL_set_fd(ssl, sock);
-
-        if (SSL_connect(ssl) != 1) {
-            SSL_free(ssl);
-            SSL_CTX_free(ctx);
-            closesocket(sock);
-            if (attempt == 2) {
-                WSACleanup();
-                throw std::runtime_error("SSL_connect failed after 3 attempts: " + format_openssl_error());
-            }
-            continue;
-        }
-
-        std::string request = "GET ";
-        request += path;
-        request += " HTTP/1.1\r\nHost: ";
-        request += hostname;
-        request += "\r\nConnection: close\r\n\r\n";
-
-        if (SSL_write(ssl, request.c_str(), (int)request.length()) <= 0) {
-            SSL_shutdown(ssl);
-            SSL_free(ssl);
-            SSL_CTX_free(ctx);
-            closesocket(sock);
-            if (attempt == 2) {
-                WSACleanup();
-                throw std::runtime_error("SSL_write failed after 3 attempts: " + format_openssl_error());
-            }
-            continue;
-        }
-
-        char buffer[4096];
-        int bytes;
-        response.clear();
-
-        while (true) {
-            if (!wait_for_socket(sock, false, 5000)) {
-                SSL_shutdown(ssl);
-                SSL_free(ssl);
-                SSL_CTX_free(ctx);
-                closesocket(sock);
-                if (attempt == 2) {
-                    WSACleanup();
-                    throw std::runtime_error("SSL_read timed out after 3 attempts");
-                }
-                break;
-            }
-            bytes = SSL_read(ssl, buffer, sizeof(buffer));
-            if (bytes > 0) {
-                response.append(buffer, bytes);
-            }
-            else {
-                int err = SSL_get_error(ssl, bytes);
-                if (err == SSL_ERROR_ZERO_RETURN || bytes == 0)
-                    break;
-                if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
-                    SSL_shutdown(ssl);
-                    SSL_free(ssl);
-                    SSL_CTX_free(ctx);
-                    closesocket(sock);
-                    if (attempt == 2) {
-                        WSACleanup();
-                        throw std::runtime_error("SSL_read failed after 3 attempts: " + format_openssl_error());
-                    }
-                    break;
-                }
-                break;
-            }
-        }
-
-        size_t header_end = response.find("\r\n\r\n");
-        if (header_end != std::string::npos)
-            response = response.substr(header_end + 4);
-        else
-            response.clear();
-
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        closesocket(sock);
-
-        success = true;
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (http_code >= 400) {
+        curl_easy_cleanup(curl);
+        throw std::runtime_error("HTTP error: " + std::to_string(http_code));
     }
 
-    WSACleanup();
-
-    if (!success)
-        throw std::runtime_error("Failed to download after 3 attempts");
-
+    if (res != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        throw std::runtime_error(curl_easy_strerror(res));
+    }
+    curl_easy_cleanup(curl);
     return response;
 }
 
-void plugin::gameStartupEvent() {
+HWND(WINAPI* original_GetForegroundWindow)() = nullptr;
+std::atomic<bool> gfwl_activated = false;
+
+void activate_gfwl() {
 
     // Set FixPCIDKickbug to 0
 
@@ -295,7 +177,7 @@ void plugin::gameStartupEvent() {
     const char url[] = "http://gist.githubusercontent.com/Yilmaz4/354e733972d8a55b04007c53ff0f9ce4/raw";
 
     try {
-        std::string data = https_get("gist.githubusercontent.com", "Yilmaz4/354e733972d8a55b04007c53ff0f9ce4/raw");
+        std::string data = download_from_web("gist.githubusercontent.com/Yilmaz4/354e733972d8a55b04007c53ff0f9ce4/raw");
         jsonData = nlohmann::json::parse(data);
         for (const auto& pair : jsonData) {
             std::string pcid = pair["pcid"];
@@ -323,7 +205,7 @@ void plugin::gameStartupEvent() {
 
     if (!SUCCEEDED(SHGetFolderPath(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path))) {
         MessageBox(NULL, "Failed to locate %localappdata%", "Error", MB_OK | MB_ICONERROR);
-        return;
+        ExitProcess(1);
     }
     strcat(path, "\\Microsoft\\XLive\\Titles\\5454083b");
     
@@ -334,7 +216,7 @@ void plugin::gameStartupEvent() {
         std::filesystem::remove_all(folderPath, ec);
         if (ec) {
             MessageBox(NULL, ec.message().c_str(), "Failed to delete file", MB_OK | MB_ICONERROR);
-            return;
+            ExitProcess(1);
         }
     }
 
@@ -343,14 +225,14 @@ void plugin::gameStartupEvent() {
     HMODULE hModule = LoadLibrary("LiveTokenHelper.dll");
     if (!hModule) {
         MessageBox(NULL, "Failed to load LiveTokenHelper.dll", "Error", MB_OK | MB_ICONERROR);
-        return;
+        ExitProcess(1);
     }
 
     auto XLiveSetSponsorToken = reinterpret_cast<XLiveSetSponsorTokenFunc>(GetProcAddress(hModule, "XLiveSetSponsorToken"));
     if (!XLiveSetSponsorToken) {
         MessageBox(NULL, "Failed to find XLiveSetSponsorToken function in LiveTokenHelper.dll", "Error", MB_OK | MB_ICONERROR);
         FreeLibrary(hModule);
-        return;
+        ExitProcess(1);
     }
 
     uint8_t titleIDbytes[] = { 0x3B, 0x08, 0x54, 0x54 };
@@ -363,7 +245,7 @@ void plugin::gameStartupEvent() {
     catch (const std::exception& e) {
         MessageBox(NULL, e.what(), "Error", MB_OK | MB_ICONERROR);
         FreeLibrary(hModule);
-        return;
+        ExitProcess(1);
     }
     FreeLibrary(hModule);
 
@@ -384,7 +266,7 @@ void plugin::gameStartupEvent() {
 
     if (result != ERROR_SUCCESS) {
         MessageBox(NULL, "Failed to open registry", "Error", MB_OK | MB_ICONERROR);
-        return;
+        ExitProcess(1);
     }
 
     std::uint64_t val = std::stoull(pair.first, nullptr, 16);
@@ -399,7 +281,44 @@ void plugin::gameStartupEvent() {
 
     if (result != ERROR_SUCCESS) {
         MessageBox(NULL, "Failed to write to registry", "Error", MB_OK | MB_ICONERROR);
+        ExitProcess(1);
     }
 
     RegCloseKey(hKey);
+
+    gfwl_activated.store(true);
+    MessageBox(NULL, "Activation successful", "Success", MB_OK | MB_ICONINFORMATION);
+}
+
+void plugin::gameStartupEvent() {}
+
+HWND WINAPI hooked_GetForegroundWindow() {
+    gfwl_activated.wait(false);
+    return original_GetForegroundWindow();
+}
+
+DWORD WINAPI InstallHookThread(LPVOID) {
+    MH_Initialize();
+
+    MH_CreateHook(
+        &GetForegroundWindow,
+        &hooked_GetForegroundWindow,
+        reinterpret_cast<void**>(&original_GetForegroundWindow)
+    );
+
+    MH_EnableHook(&GetForegroundWindow);
+    return 0;
+}
+
+
+BOOL WINAPI DllMain(const HMODULE instance, const uintptr_t reason, const void* lpReserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        std::thread(&activate_gfwl).detach();
+
+        DisableThreadLibraryCalls(instance);
+        CreateThread(nullptr, 0, InstallHookThread, nullptr, 0, nullptr);
+
+        plugin::Init();
+    }
+    return TRUE;
 }

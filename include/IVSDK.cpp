@@ -63,9 +63,9 @@ namespace plugin
 	}
 }
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD ul_reason_for_call, LPVOID lpReserved)
-{
-	if (ul_reason_for_call == DLL_PROCESS_ATTACH) plugin::Init();
-	return TRUE;
-}
+//BOOL APIENTRY DllMain(HMODULE module, DWORD ul_reason_for_call, LPVOID lpReserved)
+//{
+//	if (ul_reason_for_call == DLL_PROCESS_ATTACH) plugin::Init();
+//	return TRUE;
+//}
 
