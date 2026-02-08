@@ -207,8 +207,6 @@ void activate_gfwl() {
         }
     }
     catch (std::exception& e) {
-        std::string err = "Failed to fetch PCIDs from GitHub. Falling back to cache. You are more likely to experience PCID conflict.\n\n" + std::string(e.what());
-        MessageBox(NULL, err.c_str(), "Warning", MB_OK | MB_ICONINFORMATION);
         pairs = pairs_offline;
     }
 
