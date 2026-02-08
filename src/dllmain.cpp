@@ -151,8 +151,29 @@ std::string download_from_web(const std::string& url) {
     return response;
 }
 
-HWND(WINAPI* original_GetForegroundWindow)() = nullptr;
+void plugin::gameStartupEvent() {}
+
+BOOL(WINAPI* original_ShowWindow)(HWND hWnd, int nCmdShow) = nullptr;
 std::atomic<bool> gfwl_activated = false;
+
+BOOL WINAPI hooked_ShowWindow(HWND hWnd, int nCmdShow) {
+    gfwl_activated.wait(false);
+    return original_ShowWindow(hWnd, nCmdShow);
+}
+
+DWORD WINAPI InstallHookThread(LPVOID) {
+    if (MH_Initialize() != MH_OK) return 1;
+
+    if (MH_CreateHook(
+        &ShowWindow,
+        &hooked_ShowWindow,
+        reinterpret_cast<void**>(&original_ShowWindow)
+    ) != MH_OK) return 2;
+
+    if (MH_EnableHook(&ShowWindow) != MH_OK) return 3;
+
+    return 0;
+}
 
 void activate_gfwl() {
 
@@ -208,7 +229,7 @@ void activate_gfwl() {
         ExitProcess(1);
     }
     strcat(path, "\\Microsoft\\XLive\\Titles\\5454083b");
-    
+
     std::filesystem::path folderPath = path;
 
     if (std::filesystem::exists(folderPath)) {
@@ -238,7 +259,7 @@ void activate_gfwl() {
     uint8_t titleIDbytes[] = { 0x3B, 0x08, 0x54, 0x54 };
     uint32_t titleID;
     std::memcpy(&titleID, titleIDbytes, sizeof(titleID));
-    
+
     try {
         XLiveSetSponsorToken(pair.second.c_str(), titleID);
     }
@@ -287,29 +308,8 @@ void activate_gfwl() {
     RegCloseKey(hKey);
 
     gfwl_activated.store(true);
-    MessageBox(NULL, "Activation successful", "Success", MB_OK | MB_ICONINFORMATION);
+    gfwl_activated.notify_all();
 }
-
-void plugin::gameStartupEvent() {}
-
-HWND WINAPI hooked_GetForegroundWindow() {
-    gfwl_activated.wait(false);
-    return original_GetForegroundWindow();
-}
-
-DWORD WINAPI InstallHookThread(LPVOID) {
-    MH_Initialize();
-
-    MH_CreateHook(
-        &GetForegroundWindow,
-        &hooked_GetForegroundWindow,
-        reinterpret_cast<void**>(&original_GetForegroundWindow)
-    );
-
-    MH_EnableHook(&GetForegroundWindow);
-    return 0;
-}
-
 
 BOOL WINAPI DllMain(const HMODULE instance, const uintptr_t reason, const void* lpReserved) {
     if (reason == DLL_PROCESS_ATTACH) {
