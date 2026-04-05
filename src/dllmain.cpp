@@ -1,4 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+
 #include <windows.h>
 #include <winlive.h>
 #include <iostream>
@@ -17,8 +19,7 @@
 
 #include "minhook/MinHook.h"
 
-
-std::vector<std::pair<std::string, std::wstring>> pairs, pairs_offline = {
+std::vector<std::pair<std::string, std::wstring>> pairs = {
     {"f7a957f68a9ac890", L"FXRHK-T8PDY-FHBCH-G6YJG-XF8PJ"},
     {"fcc56b1292bdb323", L"WBV4B-MFGR4-Y9XY7-MKRPM-HHJ96"},
     {"3c9643c2bba342f3", L"M2RHB-TDC2R-MTHXH-GP662-XG33W"},
@@ -120,7 +121,7 @@ std::vector<std::pair<std::string, std::wstring>> pairs, pairs_offline = {
     {"eb77496b7f8db51d", L"C76HT-DC8KB-WTY84-MPYXW-268WY"}
 };
 
-static std::wstring string_to_wstring(const std::string& str) {
+static std::wstring to_wstring(const std::string& str) {
     std::wstring ws(str.begin(), str.end());
     return ws;
 }
@@ -133,67 +134,79 @@ static size_t write_callback(void* contents, size_t size, size_t nmemb, void* us
 }
 
 static std::string download_from_web(const std::string& url) {
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error("Failed to initialize CURL");
-    }
+    const long connect_timeout_sec = 2;
+    const long total_timeout_sec = 2;
+    const int max_attempts = 5;
 
-    std::string response;
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        CURL* curl = curl_easy_init();
+        if (!curl) throw std::runtime_error("Failed to initialize CURL");
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        std::string response;
 
-    CURLcode res = curl_easy_perform(curl);
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    if (http_code >= 400) {
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout_sec);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, total_timeout_sec);
+
+        CURLcode res = curl_easy_perform(curl);
+
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         curl_easy_cleanup(curl);
-        throw std::runtime_error("HTTP error: " + std::to_string(http_code));
+
+        bool success = (res == CURLE_OK && http_code < 400);
+
+        if (success) return response;
+
+        if (attempt < max_attempts)
+            std::this_thread::sleep_for(std::chrono::milliseconds{ 100 });
+        else {
+            if (res != CURLE_OK)
+                throw std::runtime_error(curl_easy_strerror(res));
+            else
+                throw std::runtime_error("HTTP error: " + std::to_string(http_code));
+        }
     }
 
-    if (res != CURLE_OK) {
-        curl_easy_cleanup(curl);
-        throw std::runtime_error(curl_easy_strerror(res));
-    }
-    curl_easy_cleanup(curl);
-    return response;
+    throw std::runtime_error("Unknown download error");
 }
 
-BOOL(WINAPI* original_ShowWindow)(HWND hWnd, int nCmdShow) = nullptr;
-std::atomic<bool> gfwl_activated = false;
-HANDLE m_hLiveNotify;
+static std::pair<std::string, std::wstring> request_client() {
+    static std::mt19937_64 gen(std::random_device{}());
+    static std::uniform_int_distribution<uint32_t> dist_id(0, std::numeric_limits<uint32_t>::max());
+    static std::uniform_int_distribution<> dist_index(0, pairs.size() - 1);
+    static uint32_t session_id = dist_id(gen);
 
-static BOOL WINAPI hooked_ShowWindow(HWND hWnd, int nCmdShow) {
-    gfwl_activated.wait(false);
-    return original_ShowWindow(hWnd, nCmdShow);
+    nlohmann::json jsonData;
+    try {
+        jsonData = nlohmann::json::parse(download_from_web("http://79.99.44.221:10000/pcid?id=" + std::to_string(session_id)));
+    }
+    catch (const std::exception& e) {
+        std::string err = e.what();
+        MessageBoxA(NULL, std::vformat(std::string("Server returned invalid JSON! Falling back to cache.\n\n{}"), std::make_format_args(err)).c_str(), "GFWLActivator.asi", MB_OK | MB_ICONWARNING);
+
+        return pairs[dist_index(gen)];
+    }
+    return { jsonData["pcid"], to_wstring(jsonData["key"].get<std::string>()) };
 }
 
-static DWORD WINAPI InstallHookThread(LPVOID) {
-    if (MH_Initialize() != MH_OK) return 1;
-
-    if (MH_CreateHook(
-        &ShowWindow,
-        &hooked_ShowWindow,
-        reinterpret_cast<void**>(&original_ShowWindow)
-    ) != MH_OK) return 2;
-
-    if (MH_EnableHook(&ShowWindow) != MH_OK) return 3;
-
+static DWORD WINAPI keepalive(LPVOID) {
+    while (true) {
+        Sleep(30000);
+        request_client();
+    }
     return 0;
 }
 
 static void activate_gfwl() {
 
-    // Choose PCID-key pair
+    // Request PCID-key pair from the lease server
 
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dist(0, pairs.size() - 1);
-
-    std::pair<std::string, std::wstring> pair = pairs[dist(gen)];
+    auto pair = request_client();
 
     // Delete previous token.bin
 
@@ -269,40 +282,32 @@ static void activate_gfwl() {
     RegCloseKey(hKey);
 }
 
-static void EventHandlerLoop() {
-    while (true) {
-        DWORD dwId;
-        ULONG_PTR param;
+HANDLE m_hLiveNotify;
 
-        while (XNotifyGetNext(m_hLiveNotify, 0, &dwId, &param)) {
-            switch (dwId) {
-            case XN_SYS_SIGNINCHANGED:
-                
-                // Reactivate GFWL when the user signs out
+struct SharedState {
+    LONG hookInstalled;
+    LONG pendingModules;
+};
+SharedState* shared;
+HANDLE hShowWindowEvent;
+HANDLE hStateUpdateEvent;
 
-                if (XUserGetSigninState(0) == eXUserSigninState_NotSignedIn) {
-                    activate_gfwl();
-                }
-                break;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::seconds{ 1 });
+BOOL(WINAPI* original_ShowWindow)(HWND hWnd, int nCmdShow) = nullptr;
+
+static BOOL WINAPI hooked_ShowWindow(HWND hWnd, int nCmdShow) {
+    SetEvent(hShowWindowEvent);
+
+    while (InterlockedCompareExchange(&shared->pendingModules, 0, 0) > 0) {
+        WaitForSingleObject(hStateUpdateEvent, INFINITE);
     }
+    return original_ShowWindow(hWnd, nCmdShow);
 }
 
-static void InitializeEventHandler() {
-    while (true) {
-        m_hLiveNotify = XNotifyCreateListener(XNOTIFY_SYSTEM);
-        if (m_hLiveNotify == NULL) {
-            std::this_thread::sleep_for(std::chrono::seconds{ 1 });
-            continue;
-        }
-        break;
-    }
-    EventHandlerLoop();
-}
+static void gfwlactivator_init() {
 
-static void Startup() {
+    // Block the game from launching
+
+    InterlockedIncrement(&shared->pendingModules);
 
     // Set FixPCIDKickbug to 0
 
@@ -319,46 +324,93 @@ static void Startup() {
         }
     }
 
-    // Download PCID-key pairs
-
-    nlohmann::json jsonData;
-    const char url[] = "http://gist.githubusercontent.com/Yilmaz4/354e733972d8a55b04007c53ff0f9ce4/raw";
-
-    try {
-        std::string data = download_from_web("gist.githubusercontent.com/Yilmaz4/354e733972d8a55b04007c53ff0f9ce4/raw");
-        jsonData = nlohmann::json::parse(data);
-        for (const auto& pair : jsonData) {
-            std::string pcid = pair["pcid"];
-            std::wstring key = string_to_wstring(pair["key"]);
-            pairs.push_back({ pcid, key });
-        }
-    }
-    catch (std::exception& e) {
-        pairs = pairs_offline;
-    }
-
     // Initial activation
 
     activate_gfwl();
 
     // Allow the game to launch
 
-    gfwl_activated.store(true);
-    gfwl_activated.notify_all();
+    if (InterlockedDecrement(&shared->pendingModules) == 0) {
+        SetEvent(hStateUpdateEvent);
+    }
+
+    // Start keepalive thread for the lease server so that our PCID doesn't get leased to someone else as long as the game is running
+
+    CreateThread(NULL, 0, keepalive, NULL, 0, NULL);
 
     // Detect sign-outs and activate again
 
-    InitializeEventHandler();
+    while (true) {
+        m_hLiveNotify = XNotifyCreateListener(XNOTIFY_SYSTEM);
+        if (m_hLiveNotify == NULL) {
+            std::this_thread::sleep_for(std::chrono::seconds{ 1 });
+            continue;
+        }
+        break;
+    }
+    while (true) {
+        DWORD dwId;
+        ULONG_PTR param;
+
+        while (XNotifyGetNext(m_hLiveNotify, 0, &dwId, &param)) {
+            switch (dwId) {
+            case XN_SYS_SIGNINCHANGED:
+
+                // Reactivate GFWL when the user signs out
+
+                if (XUserGetSigninState(0) == eXUserSigninState_NotSignedIn) {
+                    activate_gfwl();
+                }
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds{ 1 });
+    }
 }
 
-static BOOL WINAPI DllMain(const HMODULE instance, const uintptr_t reason, const void* lpReserved) {
+static DWORD WINAPI delay_startup(LPVOID) {
+    HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedState), L"Local\\StartupDelaySharedState");
+    if (!hMap) {
+        MessageBox(NULL, "Failed to create shared memory", "GFWLActivator", MB_OK | MB_ICONERROR);
+        ExitProcess(1);
+        return 1;
+    }
+
+    shared = (SharedState*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedState));
+    if (!shared) {
+        CloseHandle(hMap);
+        MessageBox(NULL, "Failed to open shared memory", "GFWLActivator", MB_OK | MB_ICONERROR);
+        ExitProcess(1);
+        return 1;
+    }
+
+    hShowWindowEvent = CreateEventW(nullptr, TRUE, FALSE, L"Local\\ShowWindowEvent");
+    hStateUpdateEvent = CreateEventW(nullptr, TRUE, FALSE, L"Local\\StateUpdateEvent");
+    if (!hStateUpdateEvent || !hShowWindowEvent) return 1;
+
+    if (InterlockedCompareExchange(&shared->hookInstalled, 1, 0) == 0) {
+        if (MH_Initialize() != MH_OK) return 1;
+
+        if (MH_CreateHook(
+            &ShowWindow,
+            &hooked_ShowWindow,
+            reinterpret_cast<void**>(&original_ShowWindow)
+        ) != MH_OK) return 1;
+
+        if (MH_EnableHook(&ShowWindow) != MH_OK) return 1;
+    }
+
+    gfwlactivator_init();
+    return 0;
+}
+
+BOOL WINAPI DllMain(const HMODULE instance, const uintptr_t reason, const void* lpReserved) {
     if (reason == DLL_PROCESS_ATTACH) {
-        std::thread(&Startup).detach();
+        DisableThreadLibraryCalls(instance);
 
         // Hook ShowWindow to delay the startup of the game till first activation is successful
 
-        DisableThreadLibraryCalls(instance);
-        CreateThread(nullptr, 0, InstallHookThread, nullptr, 0, nullptr);
+        CreateThread(nullptr, 0, delay_startup, nullptr, 0, nullptr);
     }
     return TRUE;
 }
