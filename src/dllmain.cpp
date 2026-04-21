@@ -178,26 +178,24 @@ static std::string download_from_web(const std::string& url) {
 static std::pair<std::string, std::wstring> request_client() {
     static std::mt19937_64 gen(std::random_device{}());
     static std::uniform_int_distribution<uint32_t> dist_id(0, std::numeric_limits<uint32_t>::max());
-    static std::uniform_int_distribution<> dist_index(0, pairs.size() - 1);
+    
     static uint32_t session_id = dist_id(gen);
 
-    nlohmann::json jsonData;
-    try {
-        jsonData = nlohmann::json::parse(download_from_web("http://79.99.44.221:10000/pcid?id=" + std::to_string(session_id)));
-    }
-    catch (const std::exception& e) {
-        std::string err = e.what();
-        MessageBoxA(NULL, std::vformat(std::string("Server returned invalid JSON! Falling back to cache.\n\n{}"), std::make_format_args(err)).c_str(), "GFWLActivator.asi", MB_OK | MB_ICONWARNING);
-
-        return pairs[dist_index(gen)];
-    }
+    nlohmann::json jsonData = nlohmann::json::parse(download_from_web("http://79.99.44.221:10000/pcid?id=" + std::to_string(session_id)));
     return { jsonData["pcid"], to_wstring(jsonData["key"].get<std::string>()) };
 }
 
 static DWORD WINAPI keepalive(LPVOID) {
+    Sleep(20000);
+
     while (true) {
-        Sleep(30000);
-        request_client();
+        try {
+            request_client();
+        } catch (...) {
+            Sleep(1000);
+            continue;
+        }
+        Sleep(20000);
     }
     return 0;
 }
@@ -206,7 +204,19 @@ static void activate_gfwl() {
 
     // Request PCID-key pair from the lease server
 
-    auto pair = request_client();
+    static std::mt19937_64 gen(std::random_device{}());
+    static std::uniform_int_distribution<> dist_index(0, pairs.size() - 1);
+
+    std::pair<std::string, std::wstring> pair;
+    try {
+        pair = request_client();
+    }
+    catch (const std::exception& e) {
+        std::string err = e.what();
+        MessageBoxA(NULL, std::vformat(std::string("Server returned invalid JSON! Falling back to cache.\n\n{}"), std::make_format_args(err)).c_str(), "GFWLActivator.asi", MB_OK | MB_ICONWARNING);
+
+        pair = pairs[dist_index(gen)];
+    }
 
     // Delete previous token.bin
 
